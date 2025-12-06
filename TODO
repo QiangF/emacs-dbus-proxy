@@ -1,0 +1,19 @@
+* TODO Methods which are present in multiple interfaces
+  A fine-grained selection of the method to call is not possible at
+  the moment
+* TODO Slots do not appear in class descriptions
+* TODO Complex argument types are not handled properly
+* TODO Automatic conversion of return values
+  Return values which are object paths are not converted to proxies
+* TODO Signal an error for invalid object info
+  An error should be signaled if one of the following parameters is
+  invalid:
+  + Bus name
+  + Service
+  + Object path
+* DONE Support for signals
+
+* settings							   :noexport:
+# Local Variables:
+# mode: org
+# End:
