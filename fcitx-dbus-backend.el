@@ -45,44 +45,51 @@
 The object path returned points to the newly created input context object,
  which implements the org.fcitx.Fcitx.InputContext1 interface (or similar).
 You then interact with this new object path for input method operations. "
-  (dbus-call-method :session fcitx-service
-                    fcitx-im-path fcitx-im-interface 
-                    "CreateInputContext"
-                    '((:struct "emacs-fcitx" client-name)))
-  (setq fcitx-ic-path (format "/org/freedesktop/portal/inputcontext/%s" id)))
+  (let ((ic (dbus-call-method :session fcitx-service
+                              fcitx-im-path fcitx-im-interface
+                              "CreateInputContext"
+                              `((:struct "emacs-fcitx" ,client-name)))))
+    (setq fcitx-ic-path (car ic))))
 
-(defun fcitx-input-context-call (method args)
-  (dbus-call-method :session fcitx-service
-                    fcitx-ic-path fcitx-ic-interface
-                    method args))
+(defun fcitx-input-context-call (method &optional args)
+  (if args
+      (dbus-call-method :session fcitx-service
+                        fcitx-ic-path fcitx-ic-interface
+                        method args)
+    (dbus-call-method :session fcitx-service
+                        fcitx-ic-path fcitx-ic-interface
+                        method)))
 
 ;; method without argument
 (defun fcitx-focusin ()
-  (fcitx-input-context-call "FocusIn" nil))
+  (fcitx-input-context-call "FocusIn"))
 
 (defun fcitx-focusout ()
-  (fcitx-input-context-call "FocusOut" nil))
+  (fcitx-input-context-call "FocusOut"))
 
 (defun fcitx-reset ()
-  (fcitx-input-context-call "Reset" nil))
+  (fcitx-input-context-call "Reset"))
 
 (defun fcitx-destroy-ic ()
-  (fcitx-input-context-call "DestroyIC" nil))
+  (fcitx-input-context-call "DestroyIC"))
 
 (defun fcitx-destroy-prevpage ()
-  (fcitx-input-context-call "PrevPage" nil))
+  (fcitx-input-context-call "PrevPage"))
 
 (defun fcitx-destroy-nextpage ()
-  (fcitx-input-context-call "NextPage" nil))
+  (fcitx-input-context-call "NextPage"))
 
 ;; SelectCandidate(i index)
 (defun fcitx-select-candidate (index)
   (fcitx-input-context-call "SelectCandidate" index))
 
+;; keycode can be looked up in keyboard.py
+;; keyval can be looked up in keysyms.py
+;; or use xev for keysym and keycode
 ;; ProcessKeyEvent(u keyval, u keycode, u state, b type, u time) = (b ret)
-(defun fcitx-process-key (index)
-  (fcitx-input-context-call "ProcessKeyEvent"
-                             keyval keycode state type time))
+(defun fcitx-process-key (keyval keycode state type)
+  (fcitx-input-context-call "ProcessKeyEvent" keyval keycode state type
+                            (round (time-to-seconds))))
 
 ;; ProcessKeyEventBatch(u nil, u nil, u nil, b nil, u nil) = (a(uv) nil, b nil)
 ;; SetSurroundingText(s nil, u nil, u nil)
