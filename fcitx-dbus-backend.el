@@ -5,8 +5,12 @@
 ;; https://github.com/fcitx/fcitx5-qt/blob/master/qt5/dbusaddons/interfaces/org.fcitx.Fcitx.InputContext1.xml
 ;; https://github.com/fcitx/fcitx5-qt/blob/master/qt5/dbusaddons/interfaces/org.fcitx.Fcitx.InputMethod1.xml
 
+;; 输入法状态是和每个 input context 绑定的
 ;; 首先 CreateInputContext，可以理解为创建了一个会话/连接，然后返回一个 dbus object path
 ;; 之后继续用这个 object 和 fcitx 互相通信，发送按键，通过dbus signal获取预编辑和候选词列表
+;; 可以使用以下命令查看发送的事件：
+;; dbus-monitor --session "type='signal',sender='org.fcitx.Fcitx5'"
+
 
 ;; (defvar fcitx-service "org.freedesktop.portal.Fcitx")
 (defvar fcitx-service "org.fcitx.Fcitx5")
@@ -49,7 +53,16 @@ You then interact with this new object path for input method operations. "
                               fcitx-im-path fcitx-im-interface
                               "CreateInputContext"
                               `((:struct "emacs-fcitx" ,client-name)))))
-    (setq fcitx-ic-path (car ic))))
+    (setq fcitx-ic-path (car ic))
+    (dbus-register-signal :session fcitx-service
+                          fcitx-ic-path "CommitString"
+                          'fcitx-handler-for-commit-string)
+    (dbus-register-signal :session fcitx-service
+                          fcitx-ic-path "UpdateClientSideUI"
+                          'fcitx-handler-for-client-ui)
+    (dbus-register-signal :session fcitx-service
+                          fcitx-ic-path "UpdateFormattedPreedit"
+                          'fcitx-handler-for-preedit-update)))
 
 (defun fcitx-input-context-call (method &optional args)
   (if args
@@ -59,6 +72,33 @@ You then interact with this new object path for input method operations. "
     (dbus-call-method :session fcitx-service
                         fcitx-ic-path fcitx-ic-interface
                         method)))
+
+;; ProcessKeyEventBatch(u nil, u nil, u nil, b nil, u nil) = (a(uv) nil, b nil)
+;; SetSurroundingText(s nil, u nil, u nil)
+;; SetSurroundingTextPosition(u nil, u nil)
+;; InvokeAction(u nil, i nil)
+;; SetSupportedCapability(t nil)
+;; SetCapability(t nil)
+
+;; signal handler:
+;; (s str)
+(defun fcitx-handler-for-commit-string (s)
+  (setq fcitx-commit-string s))
+
+;; ForwardKey(u keyval, u state, b type)
+(defun fcitx-handler-for-forward-key (keyval state type)
+  ;; lookup key in keymap
+  )
+
+;; (a(si) preedit, i cursorpos, a(si) auxUp, a(si) auxDown, a(ss) candidates,
+;; i candidateIndex, i layoutHint, b hasPrev, b hasNext)
+(defun fcitx-handler-for-client-ui (preedit cursorpos auxUp auxDown candidates
+                                            candidateIndex layoutHint hasPrev hasNext)
+  (setq fcitx-preedit-string preedit))
+
+;; UpdateFormattedPreedit(a(si) str, i cursorpos)
+(defun fcitx-handler-for-preedit-update (str cursorpos)
+  (setq fcitx-preedit-string str))
 
 ;; method without argument
 (defun fcitx-focusin ()
@@ -73,15 +113,22 @@ You then interact with this new object path for input method operations. "
 (defun fcitx-destroy-ic ()
   (fcitx-input-context-call "DestroyIC"))
 
-(defun fcitx-destroy-prevpage ()
+(defun fcitx-prevpage ()
   (fcitx-input-context-call "PrevPage"))
 
-(defun fcitx-destroy-nextpage ()
+(defun fcitx-nextpage ()
   (fcitx-input-context-call "NextPage"))
 
 ;; SelectCandidate(i index)
 (defun fcitx-select-candidate (index)
   (fcitx-input-context-call "SelectCandidate" index))
+
+;; backend interface functions
+(defun eim-backend-activate ()
+  (fcitx-controller-call "Activate"))
+
+(defun eim-backend-deactivate ()
+  (fcitx-controller-call "Deactivate"))
 
 ;; keycode can be looked up in keyboard.py
 ;; keyval can be looked up in keysyms.py
@@ -90,45 +137,6 @@ You then interact with this new object path for input method operations. "
 (defun fcitx-process-key (keyval keycode state type)
   (fcitx-input-context-call "ProcessKeyEvent" keyval keycode state type
                             (round (time-to-seconds))))
-
-;; ProcessKeyEventBatch(u nil, u nil, u nil, b nil, u nil) = (a(uv) nil, b nil)
-;; SetSurroundingText(s nil, u nil, u nil)
-;; SetSurroundingTextPosition(u nil, u nil)
-;; InvokeAction(u nil, i nil)
-;; SetSupportedCapability(t nil)
-;; SetCapability(t nil)
-
-;; signal handler:
-;; (s str)
-(defun fcitx-handler-for-commit-string (s)
-  (setq fcitx-commit-string s))
-
-(dbus-register-signal :session fcitx-service
-                      fcitx-ic-path "CommitString"
-                      'fcitx-handler-for-commit-string)
-
-;; ForwardKey(u keyval, u state, b type)
-(defun fcitx-handler-for-forward-key (keyval state type)
-  ;; lookup key in keymap
-  )
-
-;; (a(si) preedit, i cursorpos, a(si) auxUp, a(si) auxDown, a(ss) candidates,
-;; i candidateIndex, i layoutHint, b hasPrev, b hasNext)
-(defun fcitx-handler-for-client-ui (preedit cursorpos auxUp auxDown candidates
-                                            candidateIndex layoutHint hasPrev hasNext)
-  (setq fcitx-preedit-string s))
-
-(dbus-register-signal :session fcitx-service
-                      fcitx-ic-path "UpdateClientSideUI"
-                      'fcitx-handler-for-client-ui)
-
-;; UpdateFormattedPreedit(a(si) str, i cursorpos)
-(defun fcitx-handler-for-preedit-update (str cursorpos)
-  (setq fcitx-preedit-string str))
-
-(dbus-register-signal :session fcitx-service
-                      fcitx-ic-path "UpdateFormattedPreedit"
-                      'fcitx-handler-for-preedit-update)
 
 ;; backend specific key definition
 (defvar eim-backend-menu-keys `(("M-n" . 65366) ; Next PageDown
@@ -150,14 +158,8 @@ You then interact with this new object path for input method operations. "
                                        ("C-a" . 65360) ; Home
                                        ("C-e" . 65367))); End
 
-;; backend interface functions
-(defun eim-backend-activate ()
-  (fcitx-controller-call "Activate"))
-
-(defun eim-backend-deactivate ()
-  (fcitx-controller-call "Deactivate"))
-
-(defun eim-backend-process-key ())
+(defun eim-backend-process-key (keycode &optional mask)
+  (fcitx-process-key keysym keycode))
 
 (defun eim-backend-get-context ())
 

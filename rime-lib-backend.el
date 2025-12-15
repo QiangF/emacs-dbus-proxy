@@ -18,8 +18,8 @@
                                        ("C-a" . 65360) ; Home
                                        ("C-e" . 65367))); End
 
-(defun eim-backend-process-key ()
-  (rime-lib-process-key))
+(defun eim-backend-process-key (keycode mask)
+  (rime-lib-process-key keycode mask))
 
 (defun eim-backend-get-context ()
   (rime-lib-get-context))
