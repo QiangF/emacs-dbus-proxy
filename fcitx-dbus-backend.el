@@ -11,6 +11,16 @@
 ;; 可以使用以下命令查看发送的事件：
 ;; dbus-monitor --session "type='signal',sender='org.fcitx.Fcitx5'"
 
+(defun fcitx-monitor-handler (keyval keycode state type time)
+  (message "keyval %s state %s" keyval state))
+
+;; (dbus-register-monitor :session 'fcitx-monitor-handler
+;;                        :type "method_call"
+;;                        ;; :sender "org.fcitx.Fcitx5"
+;;                        ;; :destination
+;;                        :path fcitx-ic-path
+;;                        :interface "org.fcitx.Fcitx.InputContext1"
+;;                        :member "ProcessKeyEvent")
 
 ;; (defvar fcitx-service "org.freedesktop.portal.Fcitx")
 (defvar fcitx-service "org.fcitx.Fcitx5")
@@ -19,7 +29,7 @@
 (defvar fcitx-im-path "/org/freedesktop/portal/inputmethod")
 (defvar fcitx-im-interface "org.fcitx.Fcitx.InputMethod1")
 
-(defvar fcitx-pre-edit nil)
+(defvar fcitx-preedit-string nil)
 (defvar fcitx-commit-string nil)
 
 (defun fcitx-alive ()
@@ -55,23 +65,18 @@ You then interact with this new object path for input method operations. "
                               `((:struct "emacs-fcitx" ,client-name)))))
     (setq fcitx-ic-path (car ic))
     (dbus-register-signal :session fcitx-service
-                          fcitx-ic-path "CommitString"
+                          fcitx-ic-path fcitx-ic-interface "CommitString"
                           'fcitx-handler-for-commit-string)
     (dbus-register-signal :session fcitx-service
-                          fcitx-ic-path "UpdateClientSideUI"
+                          fcitx-ic-path fcitx-ic-interface "UpdateClientSideUI"
                           'fcitx-handler-for-client-ui)
     (dbus-register-signal :session fcitx-service
-                          fcitx-ic-path "UpdateFormattedPreedit"
+                          fcitx-ic-path fcitx-ic-interface "UpdateFormattedPreedit"
                           'fcitx-handler-for-preedit-update)))
 
-(defun fcitx-input-context-call (method &optional args)
-  (if args
-      (dbus-call-method :session fcitx-service
-                        fcitx-ic-path fcitx-ic-interface
-                        method args)
-    (dbus-call-method :session fcitx-service
-                        fcitx-ic-path fcitx-ic-interface
-                        method)))
+(defun fcitx-ic-call-method (method &rest args)
+  (apply 'dbus-call-method `(:session ,fcitx-service ,fcitx-ic-path ,fcitx-ic-interface ,method
+                                      ,@args)))
 
 ;; ProcessKeyEventBatch(u nil, u nil, u nil, b nil, u nil) = (a(uv) nil, b nil)
 ;; SetSurroundingText(s nil, u nil, u nil)
@@ -86,7 +91,7 @@ You then interact with this new object path for input method operations. "
   (setq fcitx-commit-string s))
 
 ;; ForwardKey(u keyval, u state, b type)
-(defun fcitx-handler-for-forward-key (keyval state type)
+(defun fcitx-handler-for-forward-key (key mask release)
   ;; lookup key in keymap
   )
 
@@ -102,26 +107,26 @@ You then interact with this new object path for input method operations. "
 
 ;; method without argument
 (defun fcitx-focusin ()
-  (fcitx-input-context-call "FocusIn"))
+  (fcitx-ic-call-method "FocusIn"))
 
 (defun fcitx-focusout ()
-  (fcitx-input-context-call "FocusOut"))
+  (fcitx-ic-call-method "FocusOut"))
 
 (defun fcitx-reset ()
-  (fcitx-input-context-call "Reset"))
+  (fcitx-ic-call-method "Reset"))
 
 (defun fcitx-destroy-ic ()
-  (fcitx-input-context-call "DestroyIC"))
+  (fcitx-ic-call-method "DestroyIC"))
 
 (defun fcitx-prevpage ()
-  (fcitx-input-context-call "PrevPage"))
+  (fcitx-ic-call-method "PrevPage"))
 
 (defun fcitx-nextpage ()
-  (fcitx-input-context-call "NextPage"))
+  (fcitx-ic-call-method "NextPage"))
 
 ;; SelectCandidate(i index)
 (defun fcitx-select-candidate (index)
-  (fcitx-input-context-call "SelectCandidate" index))
+  (fcitx-ic-call-method "SelectCandidate" index))
 
 ;; backend interface functions
 (defun eim-backend-activate ()
@@ -134,29 +139,41 @@ You then interact with this new object path for input method operations. "
 ;; keyval can be looked up in keysyms.py
 ;; or use xev for keysym and keycode
 ;; ProcessKeyEvent(u keyval, u keycode, u state, b type, u time) = (b ret)
-(defun fcitx-process-key (keyval keycode state type)
-  (fcitx-input-context-call "ProcessKeyEvent" keyval keycode state type
-                            (round (time-to-seconds))))
+;; bool processKeyEvent
+;; (uint32_t keyval, uint32_t keycode, uint32_t state, bool isRelease, uint32_t time)
+;; state representing the state of modifier keys (like Shift, Ctrl, Alt) at the time of the event. nil suggests no modifiers were active or the state is not specified. (shift: state 1
+;; The last argument, which likely provides a timestamp for the event, probably in milliseconds since a certain epoch, for timing purposes.
+;; ProcessKeyEvent(code, 0, mask, false, 0)
+(defun fcitx-process-key (keysym state)
+  ;; (fcitx-ic-call-method "ProcessKeyEvent" keysym 0
+  ;;                       state nil (round (time-to-seconds)))
+  (fcitx-ic-call-method "ProcessKeyEvent" keysym 0
+                        state nil 0))
+
+(defun fcitx-set-capability ()
+  (fcitx-ic-call-method "SetCapability" :uint64 1))
 
 ;; backend specific key definition
-(defvar eim-backend-menu-keys `(("M-n" . 65366) ; Next PageDown
-                                ("M-p" . 65365) ; Prior PageUp
-                                ("C-n" . 65364) ; C-n Down
-                                ("C-p" . 65362) ; Up
-                                ("SPC" . 32)    ; Space
+(defvar eim-backend-menu-keys `(("M-n" . #xFF56) ; Next PageDown
+                                ("M-p" . #xFF55) ; Prior PageUp
+                                ("C-n" . #xFF54) ; C-n Down
+                                ("C-p" . #xFF52) ; Up
+                                ("SPC" . #x020)  ; Space
                                 ,@(mapcar (lambda (x) `(,(char-to-string x) . ,x))
                                           (number-sequence ?0 ?9))))
 
-(defvar eim-backend-composition-keys '(("C-d" . 65535)
-                                       ("<deletechar>" . 65535)
-                                       ("C-k" . (65505 65535)) ; Shift+Delete
-                                       ("DEL" . 65288) ; BackSpace
-                                       ("<backspace>" . 65288)
-                                       ("<delete>" . 65288)
-                                       ("C-b" . 65361) ; Left
-                                       ("C-f" . 65363) ; Right
-                                       ("C-a" . 65360) ; Home
-                                       ("C-e" . 65367))); End
+;; Select = 0xFF60
+;; #define XK_Select 0xff60  /* Select, mark */
+(defvar eim-backend-composition-keys '(("C-d" . #xFFFF)
+                                       ("<deletechar>" . #xFFFF)
+                                       ("C-k" . (#xFFFF 1)) ; Shift+Delete
+                                       ("DEL" . #xFF08) ; BackSpace
+                                       ("<backspace>" . #xFF08)
+                                       ("<delete>" . #xFF08)
+                                       ("C-b" . #xFF51)   ; Left
+                                       ("C-f" . #xFF53)   ; Right
+                                       ("C-a" . #xFF50)   ; Home
+                                       ("C-e" . #xFF57))) ; End
 
 (defun eim-backend-process-key (keycode &optional mask)
   (fcitx-process-key keysym keycode))

@@ -330,26 +330,30 @@ Used to display in minibuffer when we are using input method in minibuffer."
     (eim-backend-clear-composition)
     (eim--tooltip-update)))
 
-(defun eim--send-composition-key ()
+(defun eim--send-functional-key ()
   (interactive)
   (let* ((keyseq (vector last-input-event))
          (keyseq-name (key-description keyseq))
-         (keysym-num (cdr (or (assoc keyseq-name eim-backend-menu-keys)
-                              (assoc keyseq-name eim-backend-composition-keys)))))
-    (eim-backend-process-key keysym-num 0)
+         (state 0)
+         (keysym (cdr (or (assoc keyseq-name eim-backend-menu-keys)
+                          (assoc keyseq-name eim-backend-composition-keys)))))
+    (when (listp keysym)
+      (setq state (cadr keysym)
+            keysym (car keysym)))
+    (eim-backend-process-key keysym state)
     (eim--tooltip-update)))
 
 (defvar eim--map
   (let ((map (make-sparse-keymap)))
     (dolist (i (append eim-backend-menu-keys eim-backend-composition-keys))
-      (define-key map (kbd (car i)) 'eim--send-composition-key))
+      (define-key map (kbd (car i)) 'eim--send-functional-key))
     (define-key map (kbd "<return>") 'eim--return)
     (define-key map (kbd "<escape>") 'eim--escape)
     (define-key map (kbd "C-g") 'eim--escape)
     map))
 
 (defun eim-input-method (key)
-  "Process character KEY with input method, function key is not handled by input method."
+  "Process character KEY with input method, other keys not handled."
   (if (or eim--suppressed
           ;; (lookup-key overriding-terminal-local-map (vector key))
           ;; (eq (cadr overriding-terminal-local-map) universal-argument-map)
