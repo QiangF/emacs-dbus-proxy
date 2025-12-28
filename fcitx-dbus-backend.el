@@ -48,6 +48,10 @@
 (defun fcitx-active-p ()
   (not (equal (fcitx-controller-call "State") 1)))
 
+(defun fcitx-ic-call-method (method &rest args)
+  (apply 'dbus-call-method `(:session ,fcitx-service ,fcitx-ic-path ,fcitx-ic-interface ,method
+                                      ,@args)))
+
 ;; If the CreateInputContext method requires input arguments (as D-Bus methods often do),
 ;; you would append them as additional arguments to the function call.
 ;; You can use dbus-introspect-get-signature to determine the exact arguments required for the method.
@@ -64,6 +68,17 @@ You then interact with this new object path for input method operations. "
                               "CreateInputContext"
                               `((:struct "emacs-fcitx" ,client-name)))))
     (setq fcitx-ic-path (car ic))
+    ;; set capability CapabilityFlag::ClientSideInputPanel = (1ULL << 39)
+    (fcitx-ic-call-method "SetCapability" :uint64 (ash 1 39))
+    ;; focus in
+    (fcitx-ic-focusin)
+    ;; toggle controller, activate input method
+    (dbus-call-method :session
+                      "org.fcitx.Fcitx5"
+                      "/controller"
+                      "org.fcitx.Fcitx.Controller1"
+                      "Activate"
+                      :timeout 600)
     (dbus-register-signal :session fcitx-service
                           fcitx-ic-path fcitx-ic-interface "CommitString"
                           'fcitx-handler-for-commit-string)
@@ -73,10 +88,6 @@ You then interact with this new object path for input method operations. "
     (dbus-register-signal :session fcitx-service
                           fcitx-ic-path fcitx-ic-interface "UpdateFormattedPreedit"
                           'fcitx-handler-for-preedit-update)))
-
-(defun fcitx-ic-call-method (method &rest args)
-  (apply 'dbus-call-method `(:session ,fcitx-service ,fcitx-ic-path ,fcitx-ic-interface ,method
-                                      ,@args)))
 
 ;; ProcessKeyEventBatch(u nil, u nil, u nil, b nil, u nil) = (a(uv) nil, b nil)
 ;; SetSurroundingText(s nil, u nil, u nil)
@@ -106,26 +117,26 @@ You then interact with this new object path for input method operations. "
   (setq fcitx-preedit-string str))
 
 ;; method without argument
-(defun fcitx-focusin ()
+(defun fcitx-ic-focusin ()
   (fcitx-ic-call-method "FocusIn"))
 
-(defun fcitx-focusout ()
+(defun fcitx-ic-focusout ()
   (fcitx-ic-call-method "FocusOut"))
 
-(defun fcitx-reset ()
+(defun fcitx-ic-reset ()
   (fcitx-ic-call-method "Reset"))
 
-(defun fcitx-destroy-ic ()
+(defun fcitx-ic-destroy ()
   (fcitx-ic-call-method "DestroyIC"))
 
-(defun fcitx-prevpage ()
+(defun fcitx-ic-prevpage ()
   (fcitx-ic-call-method "PrevPage"))
 
-(defun fcitx-nextpage ()
+(defun fcitx-ic-nextpage ()
   (fcitx-ic-call-method "NextPage"))
 
 ;; SelectCandidate(i index)
-(defun fcitx-select-candidate (index)
+(defun fcitx-ic-select-candidate (index)
   (fcitx-ic-call-method "SelectCandidate" index))
 
 ;; backend interface functions
@@ -147,11 +158,7 @@ You then interact with this new object path for input method operations. "
 (defun fcitx-process-key (keysym state)
   ;; (fcitx-ic-call-method "ProcessKeyEvent" keysym 0
   ;;                       state nil (round (time-to-seconds)))
-  (fcitx-ic-call-method "ProcessKeyEvent" keysym 0
-                        state nil 0))
-
-(defun fcitx-set-capability ()
-  (fcitx-ic-call-method "SetCapability" :uint64 1))
+  (fcitx-ic-call-method "ProcessKeyEvent" keysym 0 state nil 0))
 
 ;; backend specific key definition
 (defvar eim-backend-menu-keys `(("M-n" . #xFF56) ; Next PageDown
