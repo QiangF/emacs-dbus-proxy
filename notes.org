@@ -1,0 +1,828 @@
+By requesting the ClientSideInputPanel capability, you are telling Fcitx, "Don't pop up your own GTK/Qt window; just send me the data, and I'll render the candidate list myself inside Emacs."
+
+Fcitx5 capabilities are bitmasks. It is often safer to logior (bitwise OR) your flags if you want to support multiple features (like preedit or focus tracking).
+
+* Troubleshooting Steps
+
+    Check DBus Traffic: Run dbus-monitor in a terminal while running your Emacs code. You should see the UpdateClientSideUI signal being broadcast from Fcitx to your Emacs unique bus name.
+
+    Focus State: Fcitx will not send updates if it thinks the context isn't focused. Ensure FocusIn is called after the context is created.
+
+    The "Commit" Signal: You should also register for the CommitString signal. This is what Fcitx sends when you finally select a candidate or press Space/Enter to confirm text. Without handling this, you can't actually "input" text into your buffer.
+
+
+* Understanding the Flow
+
+    It is helpful to visualize how your Emacs lisp code interacts with the Fcitx daemon. Unlike standard X11/Wayland input which is handled by the window toolkit, this DBus approach creates a direct "handshake."
+    3. Creating a Practical Key Interceptor
+
+    To use this while typing, you need to intercept keys in Emacs and forward them to Fcitx. If Fcitx returns true (non-zero), it means Fcitx "consumed" the key (e.g., you typed 'n' and it's now in the preedit). If it returns false, Emacs should handle the key normally.
+
+* Potential Pitfall: Sync vs Async
+
+D-Bus calls in Emacs are synchronous by default (blocking). If the Fcitx daemon hangs, Emacs will freeze.
+
+    Tip: For a production-grade feel, consider using the asynchronous version of dbus-call-method with a callback, though it makes the logic significantly more complex because you have to handle key events out-of-order.
+
+* key
+Key Event States
+
+In ProcessKeyEvent, you are sending :uint32 0 for the state (modifiers).
+
+    Problem: If you press Shift+A, Fcitx won't know Shift was held.
+
+    Fix: You need a way to map Emacs' event-modifiers to X11/Wayland modifier masks (Shift=1, Control=4, etc.) to pass into that second :uint32.
+
+To map Emacs keys to Fcitx (which uses X11-style keysyms), you need to handle two things: the Keysym (the physical key) and the State (the modifier mask).
+1. The Modifier Mask
+
+Fcitx expects a bitmask for modifiers. Emacs represents modifiers as symbols (e.g., 'control, 'shift). You need to convert these into the standard X11 mask values.
+Modifier	X11 Bitmask Value
+Shift	(ash 1 0) → 1
+Lock	(ash 1 1) → 2
+Control	(ash 1 2) → 4
+Alt/Meta	(ash 1 3) → 8
+2. The Keysym Conversion
+
+Emacs' event-basic-type returns a character or a symbol. While ASCII characters map directly to their keysym values (e.g., ?a is 97), special keys like Backspace or Enter need translation.
+Code snippet
+
+(defun my-fcitx-get-state (modifiers)
+  "Convert Emacs modifiers list to Fcitx bitmask."
+  (let ((state 0))
+    (when (memq 'shift   modifiers) (setq state (logior state 1)))
+    (when (memq 'control modifiers) (setq state (logior state 4)))
+    (when (memq 'meta    modifiers) (setq state (logior state 8)))
+    (when (memq 'alt     modifiers) (setq state (logior state 8)))
+    state))
+
+(defun my-fcitx-get-keysym (event)
+  "Convert Emacs event to X11 keysym."
+  (let ((base (event-basic-type event)))
+    (cond
+     ((integerp base) base) ;; Basic characters (a, b, c, 1, 2, 3)
+     ((eq base 'backspace) #xff08)
+     ((eq base 'tab)       #xff09)
+     ((eq base 'return)    #xff0d)
+     ((eq base 'escape)    #xff1b)
+     ((eq base 'delete)    #xffff)
+     ((eq base 'left)      #xff51)
+     ((eq base 'up)        #xff52)
+     ((eq base 'right)     #xff53)
+     ((eq base 'down)      #xff54)
+     (t 0)))) ;; Unknown key
+
+3. Integrating with read-event
+
+To actually intercept typing in Emacs and send it to Fcitx, you can create a loop or a minor-mode map. Here is a functional test loop that captures a key and passes the correct "State" and "Keysym":
+Code snippet
+
+(defun fcitx-test-intercept ()
+  "Read one key and send it to Fcitx with correct modifiers."
+  (interactive)
+  (let* ((event (read-event "Type a key for Fcitx: "))
+         (modifiers (event-modifiers event))
+         (keysym (my-fcitx-get-keysym event))
+         (state (my-fcitx-get-state modifiers)))
+
+    (message "Sending Keysym: %d, State: %d" keysym state)
+
+    (let ((handled (dbus-call-method
+                    :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "ProcessKeyEvent"
+                    :uint32 keysym
+                    :uint32 0      ;; Keycode (often can be 0 for virtual events)
+                    :uint32 state
+                    :boolean nil   ;; isRelease
+                    :uint32 0)))   ;; Time
+      (unless handled
+        ;; If Fcitx didn't want it, let Emacs handle it normally
+        (push event unread-command-events)))))
+
+4. Why uint32 0 for Keycode?
+
+In the ProcessKeyEvent signature, the second argument is the physical hardware keycode. Because you are sending events from Emacs (software level), you usually don't have the hardware scan code. Most Fcitx engines (like Pinyin or Anthy) rely primarily on the Keysym and the State, so leaving Keycode as 0 is generally safe.
+
+* emacs lisp bitwise or (ash 1 39) (ash 1 2)
+In Emacs Lisp, the expression
+(logior (ash 1 39) (ash 1 2)) results in the integer 549,755,813,892 (or 8#20000000004#o, #x800000004 in hexadecimal).
+Here's the breakdown of the calculation using the Emacs Lisp functions:
+
+    (ash 1 39): The ash (arithmetic shift) function shifts the integer 1 left by 39 places. This is mathematically equivalent to
+
+, which equals 549,755,813,888.
+(ash 1 2): This shifts the integer 1 left by 2 places, equivalent to
+, which equals 4.
+(logior X Y): The logior function performs a bitwise inclusive OR operation on its arguments. In binary:
+
+    549,755,813,888 is represented as a 1 followed by 39 zeros.
+    4 is represented as a 1 in the third bit position (from the right, starting at 0).
+    The bitwise OR combines these, setting a bit to 1 if it is 1 in either number.
+
+Since the bits are in different positions, the result is the sum of the two numbers: 549,755,813,892 (binary 1000000000000000000000000000000000000000100).
+Emacs Lisp handles integers of arbitrary size (bignums), so this calculation does not overflow the machine's word size.
+
+* why does the key sent not handled
+When ProcessKeyEvent returns false (or 0), it usually means Fcitx has "ignored" the key. In your specific implementation, there are three likely reasons why this is happening:
+1. The Context is Not Focused
+
+Fcitx will not process key events for an Input Context (IC) unless that context is explicitly focused.
+
+    The Fix: You called FocusIn once in your test, but if you switched buffers or windows in Emacs, the focus might have been lost. Ensure you call (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path "org.fcitx.Fcitx.InputContext1" "FocusIn") right before sending the key.
+
+2. Missing "Keyboard" in Input Method List
+
+Fcitx only handles keys that match an active Input Method Engine (IME). If your current Fcitx group only contains a specific engine (like Pinyin) and it is currently in "English" mode or "Inactive" state, it might return false for certain keys because it's just passing them through.
+
+    The Check: Verify that "Keyboard" (the native layout provider) is added to your Fcitx 5 configuration.
+
+    The State: Check if the Input Context is actually "Enabled." You can call the IsEnabled method on your fcitx-ic-path to verify.
+
+3. Argument Type Mismatch (Keycode vs Keysym)
+
+Fcitx's ProcessKeyEvent expects specific bit-layouts for the keysym and state.
+
+    Keysyms: Ensure you are sending the X11 keysym. For 'n', 110 is correct, but for special keys (like Backspace), you must use the standard X11 hex values (e.g., 65288 for Backspace).
+
+    The State (Modifiers): Even if you aren't holding Shift, Fcitx sometimes expects the state field to reflect the current keyboard modifiers accurately. If you send 0 but your system thinks CapsLock is on, Fcitx might reject the event as inconsistent.
+
+Recommended Debugging Steps
+
+To see exactly why Fcitx is rejecting the key, try updating your test function to include a FocusIn call and a print of the return value:
+Code snippet
+
+(defun debug-fcitx-send (keysym)
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  (let ((result (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                                  "org.fcitx.Fcitx.InputContext1" "ProcessKeyEvent"
+                                  :uint32 keysym :uint32 0 :uint32 0 :boolean nil :uint32 0)))
+    (message "Fcitx handled key %s: %s" keysym (if result "YES" "NO"))))
+
+Visualizing the Data Flow
+
+If the result is still NO, try calling the Activate method on the Input Context first. Some engines require an explicit activation signal to start "swallowing" keys for composition.
+
+* activate
+Why this matters for "Handled" keys
+
+When you send a key via ProcessKeyEvent, Fcitx checks the internal state of that specific Input Context.
+
+    If Inactive: Fcitx usually returns false (0) for most keys because it assumes you want the "raw" keyboard output.
+
+    If Active: Fcitx will "swallow" the key, return true (1), and then emit the UpdateClientSideUI or CommitString signals you've registered.
+
+The "Lifecycle" of a Key Press
+
+To ensure your keys are handled, your logic should follow this sequence:
+
+    Create the IC (once).
+
+    FocusIn (whenever Emacs gains focus or you switch to an input buffer).
+
+    Activate (to ensure the IME is actually "on").
+
+    ProcessKeyEvent (send your 110 or other keysyms).
+
+Handy Debugging Tip
+
+You can check if your activation worked by calling the IsEnabled method. It should return :boolean t if the input method is ready to process your keys.
+Code snippet
+
+(dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                  "org.fcitx.Fcitx.InputContext1" "IsEnabled")
+
+To make this work seamlessly, you need to bridge the gap between Emacs's key system and the D-Bus calls. You also need to ensure that the "Activation" state is handled correctly, as users usually expect to toggle their input method on and off.
+1. The Trigger Function
+
+This function will toggle the activation state. If the IM is off, it turns it on and focuses; if it's on, it turns it off.
+Code snippet
+
+(defun fcitx-toggle-and-focus ()
+  "Toggle the Fcitx input method state."
+  (interactive)
+  (let ((is-enabled (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                                      "org.fcitx.Fcitx.InputContext1" "IsEnabled")))
+    (if is-enabled
+        (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                          "org.fcitx.Fcitx.InputContext1" "Deactivate")
+      (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                        "org.fcitx.Fcitx.InputContext1" "FocusIn")
+      (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                        "org.fcitx.Fcitx.InputContext1" "Activate"))
+    (message "Fcitx is now %s" (if (not is-enabled) "Active" "Inactive"))))
+
+;; Bind it to Ctrl+Space (or any key of your choice)
+(global-set-key (kbd "C-SPC") 'fcitx-toggle-and-focus)
+
+2. Automating the Key Forwarding
+
+Once activated, you want Emacs to send typing keys to Fcitx. A simple way to test this without breaking all of Emacs is to create a minor mode or use post-self-insert-hook. However, for a "pure" D-Bus integration, you usually intercept keys at a lower level.
+
+Here is a logic flow of how Emacs handles the event after you press a key:
+3. Verification Table
+
+If you find that Activate still doesn't result in "Handled" keys, check these common D-Bus return values:
+Method	Expected Return	Meaning if Nil/False
+FocusIn	nil (Void)	Check if fcitx-ic-path is valid.
+Activate	nil (Void)	Ensure Fcitx has at least one non-keyboard IME (like Pinyin) enabled.
+IsEnabled	t (Boolean)	If nil, the engine is in "English/Bypass" mode.
+ProcessKeyEvent	t (Boolean)	If nil, Fcitx is ignoring that specific key.
+4. Important: The Keysym Conversion
+
+Emacs internal characters aren't always 1:1 with X11 keysyms that Fcitx expects.
+
+    For standard letters (a-z), (fcitx-send-key-and-process (string-to-char "a")) works.
+
+    For Backspace, use 65288.
+
+    For Return, use 65293.
+
+To bridge Emacs keys to Fcitx effectively, you need a way to translate Emacs' internal key representations into the X11 Keysyms that Fcitx 5 expects over D-Bus.
+1. The Keysym Mapping Table
+
+Emacs handles keys like backspace or tab as symbols or specific integers that don't always match the X11 standard. This helper function covers the most common "control" keys.
+Code snippet
+
+(defun my-emacs-to-fcitx-keysym (key)
+  "Convert Emacs KEY event to X11 keysym for Fcitx."
+  (cond
+   ((numberp key)
+    (cond
+     ((eq key ?\r) 65293)      ;; Enter
+     ((eq key ?\t) 65302)      ;; Tab
+     ((eq key 127) 65288)      ;; Backspace (often 127 in Emacs)
+     ((eq key 27)  65307)      ;; Escape
+     (t key)))                 ;; Standard ASCII (a, b, c...)
+   ((eq key 'backspace) 65288)
+   ((eq key 'tab)       65302)
+   ((eq key 'return)    65293)
+   ((eq key 'escape)    65307)
+   ((eq key 'left)      65361)
+   ((eq key 'right)     65363)
+   ((eq key 'up)        65362)
+   ((eq key 'down)      65364)
+   (t nil)))
+
+2. The Global Interceptor
+
+To make Fcitx feel "native," you can use read-event or a low-level hook. However, the most reliable way to test this without breaking your Emacs session is to wrap the logic in a command that forwards the last input key.
+Code snippet
+
+(defun fcitx-forward-last-key ()
+  "Forward the last pressed key to Fcitx and handle the result."
+  (interactive)
+  (let* ((last-key last-command-event)
+         (keysym (my-emacs-to-fcitx-keysym last-key)))
+    (if (and keysym (fcitx-send-key-and-process keysym))
+        ;; Fcitx handled it (composition started/updated)
+        (message "Fcitx: Processing...")
+      ;; Fcitx ignored it (insert raw character)
+      (insert-char last-key))))
+
+3. State Management
+
+When you press C-SPC to activate, you need to track whether Emacs should be "intercepting" keys.
+4. Why Activate is Key
+
+If you call Activate and the IsEnabled check returns t, Fcitx enters a "grab" state for that Input Context.
+
+    If you send 'n' (110): Fcitx will return 1 (true), and you will see your message from the UpdateClientSideUI signal handler trigger in the minibuffer.
+
+    If you send '1' (49): If a candidate list is open, Fcitx handles it to select the first candidate and calls CommitString.
+
+Complete Toggle Logic
+
+Combine everything into a single "Power Toggle":
+Code snippet
+
+(defun fcitx-ultra-toggle ()
+  "Toggle Fcitx, Focus it, and verify activation."
+  (interactive)
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  (let ((currently-on (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                                        "org.fcitx.Fcitx.InputContext1" "IsEnabled")))
+    (if currently-on
+        (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                          "org.fcitx.Fcitx.InputContext1" "Deactivate")
+      (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                        "org.fcitx.Fcitx.InputContext1" "Activate"))
+    (message "Fcitx Status: %s" (if (not currently-on) "ON" "OFF"))))
+
+(global-set-key (kbd "C-SPC") 'fcitx-ultra-toggle)
+(global-set-key (kbd "S-SPC") 'fcitx-ultra-toggle)
+
+* "org.freedesktop.DBus.Error.UnknownMethod" "Unknown method Activate or interface org.fcitx.Fcitx.InputContext1."
+In Fcitx 5, while the main controller uses Activate, individual Input Context objects (the one at fcitx-ic-path) often use a slightly different set of methods for state management. Specifically, many versions of the Fcitx 5 D-Bus interface use FocusIn to prepare the context and expect the Toggle logic or State logic to be handled via the frontend.
+
+However, the most common reason for "Unknown Method" on the IC path is that you might be trying to call Activate on the Input Context interface when it actually belongs to the Input Method interface, or simply that the method is named Reset or FocusIn in that specific version.
+1. The Correct Method Check
+
+Let's verify what your specific Fcitx 5 instance supports. Usually, for an InputContext1 object, the "Activation" is actually triggered by FocusIn followed by a key event that triggers the engine (like Control+Space), or by calling Reset.
+
+If you want to force the IM to turn on programmatically via the IC path, try using SetCapability:
+Code snippet
+
+;; Instead of Activate, ensure the context is focused and "Put" into the right state
+(dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                  "org.fcitx.Fcitx.InputContext1" "FocusIn")
+
+2. Why "Unknown Method" Happens
+
+The fcitx-ic-path is a dynamic path (e.g., /org/freedesktop/portal/inputmethod/0). This object implements org.fcitx.Fcitx.InputContext1. If you call a method not defined in that specific XML introspection, D-Bus throws that error.
+
+Try this updated Toggle function which uses FocusIn and FocusOut (the standard way to "activate" a context) or calls the main service to toggle:
+Code snippet
+
+(defun fcitx-debug-list-methods ()
+  "Print all methods available on your current IC path to the *Messages* buffer."
+  (interactive)
+  (message "%s" (dbus-get-all-managed-objects :session "org.fcitx.Fcitx5" "/")))
+
+(defun fcitx-force-activate ()
+  "Standard Fcitx 5 IC activation flow."
+  (interactive)
+  ;; 1. Focus the context
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  ;; 2. If Activate failed, Fcitx 5 often uses 'Reset' to clear/start state
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "Reset")
+  (message "Context Focused and Reset"))
+
+3. Introspecting the Interface
+
+If you want to see exactly what methods your Fcitx 5 provides for that path, run this in your terminal:
+Bash
+
+dbus-send --session --print-reply --dest=org.fcitx.Fcitx5 $FCITX_IC_PATH org.freedesktop.DBus.Introspectable.Introspect
+
+(Replace $FCITX_IC_PATH with the string value of your fcitx-ic-path variable).
+Summary of common IC Methods
+
+If Activate is missing, look for these in your introspection output:
+
+    FocusIn / FocusOut: Primary way to tell Fcitx "I am using this now."
+
+    Reset: Often used to initialize the engine state.
+
+    ProcessKeyEvent: The heart of the interaction.
+
+To find out exactly what methods your version of Fcitx 5 supports for the Input Context, we can use the org.freedesktop.DBus.Introspectable interface. This will return an XML string describing all available methods, signals, and properties.
+1. The Introspection Script
+
+Run this snippet in your *scratch* buffer. It will fetch the XML and pop it into a buffer called *fcitx-introspection*.
+Code snippet
+
+(defun fcitx-introspect-ic ()
+  "Fetch and display the supported D-Bus methods for the current IC path."
+  (interactive)
+  (let ((xml (dbus-call-method :session
+                               "org.fcitx.Fcitx5"
+                               fcitx-ic-path
+                               "org.freedesktop.DBus.Introspectable"
+                               "Introspect")))
+    (with-current-buffer (get-buffer-create "*fcitx-introspection*")
+      (erase-buffer)
+      (insert xml)
+      (xml-mode)
+      (display-buffer (current-buffer))
+      (goto-char (point-min))
+      (message "Introspection complete. Look for <method name=... />"))))
+
+2. What to Look For
+
+Once the buffer opens, search (using C-s) for the following strings. This will tell us the "true" names of the methods available to you:
+
+    Toggle: Some versions use a specific Toggle method instead of Activate.
+
+    Reset: Almost all ICs have this; it usually re-initializes the state.
+
+    FocusIn: Confirm this exists (it should, as you've used it).
+
+    ProcessKeyEventBatch: Newer versions of Fcitx 5 sometimes prefer batching.
+
+3. Likely Culprit: Interface vs. Service
+
+The error Unknown method Activate usually means you are calling the method on the Input Context object (the one with the number ID) but that specific method might be defined on the Main Controller object.
+
+In Fcitx 5, the "Master Switch" is often here:
+
+    Object Path: /org/freedesktop/portal/inputmethod
+
+    Interface: org.fcitx.Fcitx.InputMethod1
+
+Try calling Activate there instead:
+Code snippet
+
+(dbus-call-method :session
+                  "org.fcitx.Fcitx5"
+                  "/org/freedesktop/portal/inputmethod" ;; The "Master" path
+                  "org.fcitx.Fcitx.InputMethod1"
+                  "Activate")
+
+Summary of the D-Bus Hierarchy
+Role	Path	Interface
+Global Controls	/org/freedesktop/portal/inputmethod	org.fcitx.Fcitx.InputMethod1
+This Specific Buffer	fcitx-ic-path (e.g., /.../0)
+
+* The reason you aren't seeing messages from UpdateClientSideU
+because the handshake between Emacs and Fcitx hasn't reached the state where Fcitx considers the "Client Side UI" to be active.
+
+Even if you send the capability flags, Fcitx only emits that signal when two conditions are met:
+1. The Capability Bitmask must be precise
+
+You are using (logior (ash 1 39) (ash 1 2)).
+
+    Bit 39 is indeed ClientSideInputPanel.
+
+    Bit 2 is Preedit.
+
+    Crucial Missing Bit: Many engines will not send UI updates unless you also declare Bit 1 (Capability_ClientSideControlState) or Bit 0 (Capability_Password). Without Bit 1, Fcitx might assume you only want the raw preedit string and not the full candidate list.
+
+2. The Engine must be in "Composing" mode
+
+Fcitx is "lazy." It won't emit the UI signal if there is nothing to show.
+
+    Testing with 'n': If you send 110 ('n'), Fcitx will only trigger UpdateClientSideUI if the current Input Method (e.g., Pinyin) is Active.
+
+    The Catch: Since you just created the context, it likely defaulted to the "Keyboard - English" engine. The English engine has no candidate list, so it will never emit UpdateClientSideUI. It just returns handled = false or commits the character immediately.
+
+How to fix it (The Diagnostic Flow)
+
+To force the signal to trigger, follow these steps in order:
+Step A: Use a wider Capability mask
+
+Try setting more standard capabilities to tell Fcitx you are a fully featured terminal/editor.
+Code snippet
+
+;; Capability bits:
+;; 1 (ClientSideControlState) | 4 (Preedit) | (1 << 39) (ClientSideInputPanel)
+(let ((cap-flag (+ (ash 1 39) (ash 1 2) (ash 1 1) 1)))
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "SetSupportedCapability" :uint64 cap-flag)
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "SetCapability" :uint64 cap-flag))
+
+Step B: Ensure a non-English IME is selected
+
+If Fcitx is in "English" mode, it ignores the UI signals. You can force an engine switch via D-Bus:
+Code snippet
+
+(dbus-call-method :session "org.fcitx.Fcitx5" "/org/freedesktop/portal/inputmethod"
+                  "org.fcitx.Fcitx.InputMethod1" "SetCurrentIM" :string "pinyin")
+;; Replace "pinyin" with "rime" or whatever you use.
+
+Step C: The "Focus-Activate-Send" Sequence
+
+The signal won't fire unless the context is focused. Run this block all at once:
+Code snippet
+
+(progn
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  ;; Use the keysym for 'n' (110)
+  (fcitx-send-key-and-process 110)
+  (message "Sent key, check *Messages* for signal log..."))
+
+Debugging with dbus-monitor
+
+If it still doesn't work, open a terminal and run:
+Bash
+
+dbus-monitor "interface='org.fcitx.Fcitx.InputContext1'"
+
+Then run your Emacs code. If you see UpdateClientSideUI in the terminal but not in Emacs, your dbus-register-signal path or interface name has a typo.
+
+The reason you aren't seeing messages from UpdateClientSideUI is most likely that Fcitx is currently using the "Keyboard" (English) engine for your new Input Context. Because the English engine has no candidate list and no complex preedit, Fcitx sees no reason to send a UI update signal.
+
+To fix this, you need to check which Input Method (IM) is active and force it to a language engine (like Pinyin or Rime) that actually uses the candidate panel.
+1. Check the Current Input Method
+
+In Fcitx 5, the "Current IM" is usually managed by the Controller interface. You can query it to see if you are stuck in "keyboard-us" mode.
+Code snippet
+
+(defun fcitx-get-current-im ()
+  "Get the unique name of the currently active Input Method."
+  (interactive)
+  (let ((im (dbus-call-method :session "org.fcitx.Fcitx5"
+                              "/org/freedesktop/portal/inputmethod"
+                              "org.fcitx.Fcitx.InputMethod1"
+                              "GetCurrentIM")))
+    (message "Current IM: %s" im)
+    im))
+
+2. Force Switch to a Language Engine
+
+If the result of the above is keyboard-us, the UpdateClientSideUI signal will never fire for keys like 'n'. Use this to switch to your preferred engine:
+Code snippet
+
+(defun fcitx-set-pinyin ()
+  "Force switch Fcitx to Pinyin engine."
+  (interactive)
+  (dbus-call-method :session "org.fcitx.Fcitx5"
+                    "/org/freedesktop/portal/inputmethod"
+                    "org.fcitx.Fcitx.InputMethod1"
+                    "SetCurrentIM" :string "pinyin")) ;; or "rime", "chewing", etc.
+
+3. Verification Checklist
+
+If you switch to Pinyin and still get no signal after sending a key, verify these two "hidden" requirements:
+
+    Focus State: Fcitx only sends UI signals to the focused Input Context. Ensure you call FocusIn on your fcitx-ic-path immediately before sending the test key.
+
+    The "Handshake" Bits: Your SetCapability call must include the ClientSideControlState bit so Fcitx knows you want to manage the window yourself.
+
+The "Full Reset" Test
+
+Run this block to see if you can trigger the message:
+Code snippet
+
+(progn
+  ;; 1. Focus
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  ;; 2. Switch to a complex engine
+  (fcitx-set-pinyin)
+  ;; 3. Send 'n'
+  (fcitx-send-key-and-process 110)
+  (message "Check *Messages* for the signal handler output!"))
+
+* Would you like me to show you how to list all available Input Method names on your system so you know exactly what string to pass to SetCurrentIM?
+To know exactly which engine to switch to, you can query the main controller for a list of all installed and enabled input methods. This will give you the precise "Unique Name" (like pinyin, rime, or anthy) that the SetCurrentIM method expects.
+1. List All Available Engines
+
+The ListInputMethods method returns a list of structures. In Emacs Lisp/D-Bus terms, this usually comes back as a nested list.
+Code snippet
+
+(defun fcitx-list-all-im ()
+  "Get a list of all available input methods and their unique names."
+  (interactive)
+  (let ((im-list (dbus-call-method :session "org.fcitx.Fcitx5"
+                                  "/org/freedesktop/portal/inputmethod"
+                                  "org.fcitx.Fcitx.InputMethod1"
+                                  "ListInputMethods")))
+    (with-current-buffer (get-buffer-create "*fcitx-engines*")
+      (erase-buffer)
+      (dolist (im im-list)
+        ;; im is a list: (name native-name icon-name unique-name)
+        (insert (format "Name: %s | ID: %s\n" (car im) (nth 3 im))))
+      (display-buffer (current-buffer)))
+    (message "Listed %d engines in *fcitx-engines*" (length im-list))))
+
+2. Common Engine IDs
+
+If you don't want to run the code yet, here are the standard IDs for common Fcitx 5 engines:
+
+    Pinyin: pinyin
+
+    Rime: rime
+
+    Japanese (Mozc): mozc
+
+    English: keyboard-us (This is the one that causes "no signal" because it has no UI).
+
+3. Why the signal is likely missing (The "No Engine" Trap)
+
+When you create a new Input Context via D-Bus, Fcitx often creates it in a blank state. If no engine is explicitly assigned to that context, it might be sitting in a "null" engine state where it ignores all keys.
+
+To ensure the signal fires, follow this Activation Chain:
+
+    FocusIn: Tells Fcitx this buffer is active.
+
+    SetCurrentIM: Ensures an engine with a UI (like Pinyin) is active.
+
+    ProcessKeyEvent: Send a character (like 110 for 'n').
+
+4. Advanced: Checking for "Handled" vs "Filtered"
+
+If ProcessKeyEvent returns 1 (true) but you still see no signal, it means Fcitx is consuming the key but the engine decides there is nothing to show.
+
+    Note: If you are testing with English letters, make sure you are not in "English mode" within the Pinyin engine (often toggled by the Shift key). You can check this by calling the State property if available.
+
+* Would you like me to show you how to set up a dbus-monitor equivalent inside an Emacs buffer so you can see every message Fcitx sends in real-time?
+Monitoring D-Bus traffic directly inside Emacs is the best way to debug why signals aren't arriving. We can use the dbus-monitor command-line tool and pipe its output into an Emacs buffer. This allows you to see the "raw" conversation between Emacs and Fcitx.
+1. The Real-time D-Bus Monitor
+
+Run this function, and a buffer named *fcitx-log* will appear. It will capture every signal and method call related to Fcitx.
+Code snippet
+
+(defun fcitx-debug-start-monitor ()
+  "Start an external dbus-monitor process and pipe output to a buffer."
+  (interactive)
+  (let ((buf (get-buffer-create "*fcitx-log*")))
+    (with-current-buffer buf (erase-buffer))
+    (make-process
+     :name "fcitx-monitor"
+     :buffer buf
+     :command (list "dbus-monitor" "destination=org.fcitx.Fcitx5"
+                    "sender=org.fcitx.Fcitx5"))
+    (display-buffer buf)
+    (with-current-buffer buf
+      (goto-char (point-max))
+      (insert "--- Monitoring Fcitx D-Bus Traffic ---\n"))))
+
+2. How to read the log
+
+Once the monitor is running, perform your test (Focus -> Send 'n'). Look for these specific entries in the *fcitx-log*:
+
+    method call ... member=ProcessKeyEvent: This confirms Emacs is successfully talking to Fcitx.
+
+    method return ...: Look at the boolean value here. If it's false, the engine is ignoring you.
+
+    signal ... member=UpdateClientSideUI: If you see this in the log but NOT in your Emacs *Messages* buffer, then your dbus-register-signal path is incorrect (usually a trailing slash or a mismatched object path).
+
+3. The "Missing Link" Check
+
+If the monitor shows no UpdateClientSideUI signal at all, check the Capabilities one last time. Fcitx 5 is very strict: if it thinks the client can't render a UI, it won't send the signal.
+
+Ensure you are sending these flags to the IC path:
+
+    Bit 2 (4): Client handles Preedit.
+
+    Bit 39 (549755813888): Client handles the Input Panel.
+
+Code snippet
+
+;; A robust capability bitmask
+(let ((caps (logior (ash 1 39) (ash 1 2) (ash 1 1))))
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "SetCapability"
+                    :uint64 caps))
+
+4. Stopping the Monitor
+
+When you are done, kill the process to save resources:
+Code snippet
+
+(defun fcitx-debug-stop-monitor ()
+  (interactive)
+  (delete-process "fcitx-monitor")
+  (message "Fcitx monitor stopped."))
+
+* Would you like me to show you how to parse the UpdateClientSideUI arguments into a pretty-printed list in your minibuffer so it's easier to read than a raw message?
+To make the UpdateClientSideUI data useful, we need to handle the complex arguments it returns. Fcitx sends a lot of information (preedit, cursor, candidates, etc.).
+
+By parsing this into a "Pretty List," you can verify exactly what the Pinyin or Rime engine is thinking.
+1. The Pretty-Printer Signal Handler
+
+Replace your current UpdateClientSideUI registration with this version. It extracts the candidate strings (which are sent as a list of structures) and prints them clearly.
+Code snippet
+
+(dbus-register-signal :session
+                      "org.fcitx.Fcitx5"
+                      fcitx-ic-path
+                      "org.fcitx.Fcitx.InputContext1"
+                      "UpdateClientSideUI"
+                      (lambda (preedit cursorpos auxUp auxDown candidates
+                               candidateIndex layoutHint hasPrev hasNext)
+                        ;; 1. Extract candidate strings (they are the first element in each sublist)
+                        (setq fcitx-candidates (mapcar #'car candidates))
+                        (setq fcitx-preedit-string preedit)
+
+                        ;; 2. Format a pretty string for the Echo Area
+                        (let* ((cand-str (mapconcat 'identity fcitx-candidates " "))
+                               (display-msg (format "IM [%s] | Candidates: %s"
+                                                    preedit
+                                                    (if fcitx-candidates cand-str "None"))))
+                          (message "%s" display-msg)
+                          ;; Force update so you see it immediately
+                          (force-mode-line-update))))
+
+2. Understanding the Arguments
+
+When this signal triggers, here is what you are actually receiving from Fcitx:
+Argument	Type	Description
+preedit	String	The text currently being typed (e.g., "nihao").
+candidates	List	A list of structures: ((text label) (text label) ...).
+candidateIndex	Int	The index of the currently highlighted candidate.
+layoutHint	Int	Usually 0, tells you if the list is vertical or horizontal.
+3. A "Quick-Fire" Test Command
+
+If the signal is registered, run this block. It focuses, ensures you are using a candidate-heavy engine, and sends two keys ('n' and 'i') to trigger a list.
+Code snippet
+
+(defun fcitx-test-sequence ()
+  (interactive)
+  ;; Ensure we are using Pinyin for the test
+  (dbus-call-method :session "org.fcitx.Fcitx5" "/org/freedesktop/portal/inputmethod"
+                    "org.fcitx.Fcitx.InputMethod1" "SetCurrentIM" :string "pinyin")
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+
+  ;; Send 'n' (110) then 'i' (105)
+  (fcitx-send-key-and-process 110)
+  (fcitx-send-key-and-process 105)
+  (message "Keys sent. If Pinyin is active, you should see '你' in the echo area."))
+
+Why you might still see "None"
+
+If the UpdateClientSideUI fires but candidates is empty:
+
+    Engine State: You might be in "English" mode within the Pinyin engine. Try sending (fcitx-send-key-and-process 65505) (the Shift key) to toggle it.
+
+    Incomplete Input: Some engines wait for more than one character before showing candidates.
+
+* Fcitx 5 exposes itself in two ways:
+
+    The Portal Interface (/org/freedesktop/portal/inputmethod): Designed to be a generic standard for all IMs.
+
+    The Native Interface (/controller): Specific to Fcitx 5 features.
+
+If ListInputMethods failed on the portal path, it's usually because that generic portal doesn't support management—it only supports input. Switching to the native /controller path usually solves this.
+
+* commit
+To prevent Fcitx from committing the current preedit string when the input context loses focus (the ClientUnfocusCommit behavior), you need to adjust the Capabilities you send to Fcitx during the handshake.
+
+In Fcitx 5, "Commit on Unfocus" is often the default behavior to prevent users from losing their typed text. To disable this, you must explicitly tell Fcitx that your client handles the control state and that you do not want auto-committing features.
+1. Update the Capability Mask
+
+The trick is to include Capability_ClientSideControlState (Bit 1) but avoid any bits that delegate focus-commit logic to the server. By declaring client-side control, you are telling Fcitx: "I am in charge of the lifecycle; don't commit unless I tell you to."
+
+Update your capability setup to use this bitmask:
+Code snippet
+
+(let* ((Capability_Preedit (ash 1 2))             ; Bit 2
+       (Capability_ClientSideControlState (ash 1 1)) ; Bit 1
+       (Capability_ClientSideInputPanel (ash 1 39))  ; Bit 39
+       ;; Combine them. Note: We are EXCLUDING bits related to shared state
+       (cap-flag (logior Capability_Preedit
+                         Capability_ClientSideControlState
+                         Capability_ClientSideInputPanel)))
+
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "SetSupportedCapability" :uint64 cap-flag)
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "SetCapability" :uint64 cap-flag))
+
+2. Why this works
+
+Fcitx 5 uses these bits to determine "Who is responsible for the text?"
+
+    If ClientSideControlState is off, Fcitx assumes the application is "dumb" and will auto-commit on FocusOut to ensure the text isn't lost.
+
+    If ClientSideControlState is on, Fcitx assumes the application is "smart" (like your D-Bus implementation) and expects the application to manage the buffer.
+
+3. Verification: Handling FocusOut manually
+
+To ensure the preedit simply disappears (instead of being inserted into your buffer) when you switch windows, you should explicitly call Reset or FocusOut in your Emacs focus hooks:
+Code snippet
+
+(defun fcitx-quiet-focus-out ()
+  "Tell Fcitx to drop the current preedit without committing it."
+  (interactive)
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "Reset")
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusOut"))
+
+;; Optional: Hook this into Emacs window change
+;; (add-hook 'window-selection-change-functions (lambda (_) (fcitx-quiet-focus-out)))
+
+4. Summary of Bits
+Bit	Name	Value	Purpose in your case
+1	ClientSideControlState	2	Disables automatic "safety" commits from Fcitx.
+2	Preedit	4	Required to receive the UpdatePreedit signal.
+39	ClientSideInputPanel	549755813888	Required to receive UpdateClientSideUI.
+
+Would you like me to help you set up an Emacs hook that automatically calls FocusOut when you switch away from a buffer, so Fcitx stays perfectly in sync?
+
+* why "UpdateClientSideUI" signal callback not run
+The most likely reason your UpdateClientSideUI signal is not firing is that Fcitx5 only sends that signal if it believes the client is capable of rendering its own UI.
+
+The "Preedit" Signal Ambiguity
+
+Fcitx5 actually has two ways of sending preedit data:
+
+    UpdatePreedit: The "classic" way (sent if you don't have client-side UI enabled).
+
+    UpdateClientSideUI: The "modern" way (sent only if bit 39 is set).
+
+If you set bit 39 correctly but still get nothing, it might be because the Rime engine (or your specific Fcitx configuration) is overriding the client-side request.
+3. Debugging Checklist
+
+To find exactly where the communication is breaking down:
+
+    Check the unique path: Evaluate fcitx-ic-path. If it's nil or just /, the context creation failed.
+
+    Monitor D-Bus in Terminal: Run this in your terminal while you run your Emacs code:
+    Bash
+
+    dbus-monitor "interface='org.fcitx.Fcitx.InputContext1'"
+
+    If you see UpdatePreedit appearing in the terminal but your Emacs code doesn't catch it, your Emacs is listening for the wrong signal name. If you see nothing in the terminal when you send keys, the ProcessKeyEvent call is failing or Fcitx doesn't think the context is focused.
+
+    Force Focus: Ensure you call FocusIn after setting capabilities. Fcitx often ignores capability changes if the context isn't active.
+
+Revised Signal Registration
+
+Sometimes Emacs D-Bus matching is picky about the "Service" name. Try registering the signal without the service name (making it a broadcast listener for that path):
+Code snippet
+
+(dbus-register-signal :session
+                      nil  ;; Change "org.fcitx.Fcitx5" to nil to listen broadly
+                      fcitx-ic-path
+                      "org.fcitx.Fcitx.InputContext1"
+                      "UpdateClientSideUI"
+                      (lambda (&rest args)
+                        (message "Signal received: %S" args)))

@@ -36,6 +36,41 @@
   "Check if theres a running fcitx."
   (dbus-ping :session fcitx-service 100))
 
+(defun fcitx-find-correct-service ()
+  "List all registered D-Bus services containing 'Fcitx'."
+  (interactive)
+  (let ((services (dbus-call-method :session "org.freedesktop.DBus"
+                                    "/org/freedesktop/DBus"
+                                    "org.freedesktop.DBus"
+                                    "ListNames")))
+    (message "Found Fcitx-related services: %s"
+             (seq-filter (lambda (s) (string-match-p "Fcitx" s)) services))))
+
+(defun fcitx-list-all-im ()
+  "Get a list of all available input methods and their unique names."
+  (interactive)
+  (let ((im-list (dbus-call-method :session "org.fcitx.Fcitx5"
+                                   "/controller"
+                                   "org.fcitx.Fcitx.Controller1"
+                                   "AvailableInputMethods")))
+    (with-current-buffer (get-buffer-create "*fcitx-engines*")
+      (erase-buffer)
+      (dolist (im im-list)
+        ;; im is a list: (name native-name icon-name unique-name)
+        (insert (format "Name: %s | ID: %s\n" (car im) (nth 3 im))))
+      (display-buffer (current-buffer)))
+    (message "Listed %d engines in *fcitx-engines*" (length im-list))))
+
+(defun fcitx-get-current-im ()
+  "Get the unique name of the currently active Input Method."
+  (interactive)
+  (let ((im (dbus-call-method :session "org.fcitx.Fcitx5"
+                              "/controller"
+                              "org.fcitx.Fcitx.Controller1"
+                              "CurrentInputMethod")))
+    (message "Current IM: %s" im)
+    im))
+
 (defun fcitx-controller-call (method)
   (let ((event last-input-event)
         (result (dbus-call-method :session fcitx-service "/controller"
@@ -155,6 +190,8 @@ You then interact with this new object path for input method operations. "
 ;; state representing the state of modifier keys (like Shift, Ctrl, Alt) at the time of the event. nil suggests no modifiers were active or the state is not specified. (shift: state 1
 ;; The last argument, which likely provides a timestamp for the event, probably in milliseconds since a certain epoch, for timing purposes.
 ;; ProcessKeyEvent(code, 0, mask, false, 0)
+;; nil (False) for the type parameter usually means Key Release in some DBus specs, or Key Press depending on the specific implementation. For Fcitx, usually 0 is press and 1 is release. Ensure you are sending a "Press" event to trigger a response.
+
 (defun fcitx-process-key (keysym state)
   ;; (fcitx-ic-call-method "ProcessKeyEvent" keysym 0
   ;;                       state nil (round (time-to-seconds)))
