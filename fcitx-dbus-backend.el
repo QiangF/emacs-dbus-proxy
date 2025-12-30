@@ -230,4 +230,10 @@ You then interact with this new object path for input method operations. "
 
 (defun eim-backend-get-input ())
 
+;; after-focus-change-function triggers both at focusin and focusout
+(defun eim-focusin ()
+  (fcitx-ic-focusin)
+  ;; toggle input method based on buffer local variable
+  )
+
 (provide 'fcitx-dbus-backend)

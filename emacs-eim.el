@@ -248,6 +248,7 @@ Used to display in minibuffer when we are using input method in minibuffer."
 
 (defun eim--activate (&optional _name)
   (unless buffer-read-only
+    (add-function :after after-focus-change-function #'eim-focusin)
     (setq-local eim-function 'eim-input-method)
     (setq-local deactivate-current-eim-function #'eim--deactivate)
     (add-hook 'post-command-hook 'eim--suppress-check)
@@ -266,6 +267,7 @@ Used to display in minibuffer when we are using input method in minibuffer."
   (setq cursor-type eim--default-cursor))
 
 (defun eim--deactivate ()
+  (remove-function after-focus-change-function #'eim-focusin)
   (kill-local-variable 'eim-function)
   (remove-hook 'post-command-hook 'eim--suppress-check)
   (advice-remove 'keyboard-quit 'eim--map-unset)

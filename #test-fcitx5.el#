@@ -24,8 +24,8 @@
        (ClientSideInputPanel (ash 1 39))
        ;; Combine them. Note: We are EXCLUDING bits related to shared state
        (cap-flag (logior
-                  ;; ClientSideUI
-                  Preedit
+                  ClientSideUI
+                  ;; Preedit
                   ClientSideControlState
                   ;; Password
                   ;; KeyEventOrderFix
@@ -44,28 +44,18 @@
                       "org.fcitx.Fcitx5"
                       fcitx-ic-path
                       "org.fcitx.Fcitx.InputContext1"
-                      "UpdateFormattedPreedit"
-                      (lambda (preedit cursorpos)
-                        (setq fcitx-preedit-string preedit)
-                        (message "Preedit: %s" preedit)))
-
-(dbus-register-signal :session
-                      "org.fcitx.Fcitx5"
-                      fcitx-ic-path
-                      "org.fcitx.Fcitx.InputContext1"
                       "UpdateClientSideUI"
                       (lambda (preedit cursorpos auxUp auxDown candidates
                                        candidateIndex layoutHint hasPrev hasNext)
                         (setq fcitx-preedit-string preedit)
                         (setq fcitx-candidates candidates)
                         (message "Preedit: %s Candidates: %s" preedit candidates)))
-
-;; (dbus-register-signal :session
-;;                       "org.fcitx.Fcitx5"
-;;                       fcitx-ic-path
-;;                       "org.fcitx.Fcitx.InputContext1"
-;;                       "UpdateClientSideUI"
-;;                       (lambda (&rest args) (message "Signal received: %S" args)))
+(dbus-register-signal :session
+                      "org.fcitx.Fcitx5"
+                      fcitx-ic-path
+                      "org.fcitx.Fcitx.InputContext1"
+                      "UpdateClientSideUI"
+                      (lambda (&rest args) (message "Signal received: %S" args)))
 
 ;; (dbus-register-signal :session nil nil nil "UpdateClientSideUI"
 ;;                       (lambda (&rest args) (message "Signal received: %S" args)))
@@ -121,8 +111,20 @@
 ;; Test: Send 'n'
 (fcitx-send-key 110)
 (sleep-for 0.5)
-;; i
-(fcitx-send-key 105)
-;; space
-(fcitx-send-key 32)
-;; now fcitx-commit-string is 你
+;; h
+(fcitx-send-key 104)
+
+(defun eim-focusin ()
+  (message "focus in")
+  (dbus-call-method :session "org.fcitx.Fcitx5" fcitx-ic-path
+                    "org.fcitx.Fcitx.InputContext1" "FocusIn")
+  (dbus-call-method :session
+                  "org.fcitx.Fcitx5"
+                  "/controller"
+                  "org.fcitx.Fcitx.Controller1"
+                  "SetCurrentIM"
+                  :string "rime")
+
+)
+(add-function :after after-focus-change-function #'eim-focusin)
+

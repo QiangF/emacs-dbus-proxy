@@ -34,3 +34,5 @@
   (rime-lib-get-input))
 
 (provide 'rime-lib-backend)
+
+(defun eim-focusin ())
